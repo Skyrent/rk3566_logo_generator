@@ -28,34 +28,38 @@ on:
       hdmi_picture_link:
         description: 'HTML link to your png file for hdmi out'
         required: false
+
 jobs:
-  # This workflow contains a single job.
   build:
-    # The type of runner that the job will run on
     runs-on: ubuntu-24.04
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
     - name: checkout_repo
       uses: actions/checkout@v4
       with:
         ref: ${{ github.ref_name }}
         fetch-depth: 1
+
     - name: checkout kernel repo selected
       id: Build_kernel_with_new_logo
       shell: bash {0}
       run: |
 
-        # Verify that html link provided is to a file ending in .png or is from ibb.co
-        if [[ "${{ github.event.inputs.picture_link }}" != *.png ]] && [[ "${{ github.event.inputs.picture_link }}" != *.PNG ]] && [[ "${{ github.event.inputs.picture_link }}" != *"ibb.co"* ]]; then
-          echo "::error::Link doesn't seem to contain a .png file"
+        set -e
+
+        echo "picture_link = '${{ github.event.inputs.picture_link }}'"
+        echo "hdmi_picture_link = '${{ github.event.inputs.hdmi_picture_link }}'"
+
+        # Verify that link looks like png or ibb.co
+        if [[ "${{ github.event.inputs.picture_link }}" != *.png ]] && [[ "${{ github.event.inputs.picture_link }}" != *.PNG ]] && [[ "${{ github.event.inputs.picture_link }}" != *"ibb.co"* ]] && [[ "${{ github.event.inputs.picture_link }}" != *"pasteboard.co"* ]]; then
+          echo "::error::Link doesn't seem to contain a .png file or a supported host"
           exit 1
         fi
 
-        # Install necessary kernel building and logo processing tools
+        # Install necessary tools
         sudo apt -y update
-        sudo apt -y install build-essential git lzop build-essential gcc bc libncurses5-dev libc6-i386 lib32stdc++6 zlib1g netpbm imgp
+        sudo apt -y install build-essential git lzop gcc bc libncurses5-dev libc6-i386 lib32stdc++6 zlib1g netpbm imgp
 
-        # Clone the correct kernel repo for this kernel build
+        # Clone the correct kernel repo
         if [[ "${{ github.event.inputs.device_unit }}" == "RG353" ]]; then
            whichgit="RG353VKernel"
            git clone --depth=1 --recursive https://github.com/christianhaitian/${whichgit}.git
@@ -67,86 +71,112 @@ jobs:
            git clone --depth=1 --recursive https://github.com/christianhaitian/${whichgit}.git -b rk2023
         fi
 
-        # Install the necessary toolchain for building the kernel
+        # Toolchain
         mkdir -p ./prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/
         git clone --depth=1 https://github.com/christianhaitian/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu.git ./prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu
         cd ${whichgit}
 
-        # Check to see if this is a pasteboard.co or ibb.co link
-        # If it is a pasteboard.co or ibb.co link
-        # we need to get the real logo link
-        # and attempt to process it.
-        if [[ "${{ github.event.inputs.picture_link }}" == *"pasteboard.co"* ]]; then
+        ########################
+        # DOWNLOAD MAIN LOGO
+        ########################
+
+        if [[ "${{ github.event.inputs.picture_link }}" == *.png ]] || [[ "${{ github.event.inputs.picture_link }}" == *.PNG ]]; then
+          # Direct PNG
+          wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.picture_link }}" -O logo.png
+
+        elif [[ "${{ github.event.inputs.picture_link }}" == *"pasteboard.co"* ]]; then
           wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.picture_link }}" -O logo.txt
-          real_logo="$(grep 'img data-src="' logo.txt | cut -d '"' -f 2)"
-          wget -t 3 -T 60 --no-check-certificate "${real_logo}" -O logo.png
-        elif [[ "${{ github.event.inputs.picture_link }}" == *"ibb.co"* ]]; then
-        wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.picture_link }}" -O logo.txt
-        real_logo="$(grep -m1 'og:image' logo.txt | sed -n 's/.*content="\([^"]*\)".*/\1/p')"
-        if [[ -z "$real_logo" ]]; then
-        echo "::error::Could not extract direct image link from ibb.co page"
-        echo "Page content:"
-        head -n 50 logo.txt
-        exit 1
-        fi
-        echo "Resolved ibb image to: $real_logo"
-        wget -t 3 -T 60 --no-check-certificate "$real_logo" -O logo.png
+          real_logo="$(grep -m1 'img data-src="' logo.txt | cut -d '"' -f 2)"
+
+          if [[ -z "$real_logo" ]]; then
+            echo "::error::Could not extract direct image link from pasteboard.co page"
+            exit 1
+          fi
+
+          wget -t 3 -T 60 --no-check-certificate "$real_logo" -O logo.png
+
+        elif [[ "${{ github.event.inputs.picture_link }}" == *"://ibb.co/"* ]]; then
+          wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.picture_link }}" -O logo.txt
+          real_logo="$(grep -m1 'og:image' logo.txt | sed -n 's/.*content="\([^"]*\)".*/\1/p')"
+
+          if [[ -z "$real_logo" ]]; then
+            echo "::error::Could not extract direct image link from ibb.co page"
+            exit 1
+          fi
+
+          echo "Resolved ibb image to: $real_logo"
+          wget -t 3 -T 60 --no-check-certificate "$real_logo" -O logo.png
 
         else
+          # Fallback
           wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.picture_link }}" -O logo.png
         fi
-        if [ "$?" != "0" ]; then
-          echo "::error::Failed to get ${{ github.event.inputs.picture_link }}"
-          exit 1
-        fi
-        if [ ! -z "${{ github.event.inputs.hdmi_picture_link }}" ]; then
-          if [[ "${{ github.event.inputs.hdmi_picture_link }}" == *"pasteboard.co"* ]]; then
+
+        ########################
+        # DOWNLOAD HDMI LOGO (optional)
+        ########################
+
+        if [[ -n "${{ github.event.inputs.hdmi_picture_link }}" ]]; then
+
+          if [[ "${{ github.event.inputs.hdmi_picture_link }}" == *.png ]] || [[ "${{ github.event.inputs.hdmi_picture_link }}" == *.PNG ]]; then
+            wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.hdmi_picture_link }}" -O hdmi_logo.png
+
+          elif [[ "${{ github.event.inputs.hdmi_picture_link }}" == *"pasteboard.co"* ]]; then
             wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.hdmi_picture_link }}" -O hdmi_logo.txt
-            real_logo="$(grep 'img data-src="' hdmi_logo.txt | cut -d '"' -f 2)"
-            wget -t 3 -T 60 --no-check-certificate "${real_logo}" -O hdmi_logo.png
-          elif [[ "${{ github.event.inputs.hdmi_picture_link }}" == *"ibb.co"* ]]; then
+            real_logo="$(grep -m1 'img data-src="' hdmi_logo.txt | cut -d '"' -f 2)"
+
+            if [[ -z "$real_logo" ]]; then
+              echo "::error::Could not extract direct image link from pasteboard.co page (HDMI)"
+              exit 1
+            fi
+
+            wget -t 3 -T 60 --no-check-certificate "$real_logo" -O hdmi_logo.png
+
+          elif [[ "${{ github.event.inputs.hdmi_picture_link }}" == *"://ibb.co/"* ]]; then
             wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.hdmi_picture_link }}" -O hdmi_logo.txt
-            real_logo="$(grep 'og:image" content="' hdmi_logo.txt | cut -d '"' -f 4)"
-            wget -t 3 -T 60 --no-check-certificate "${real_logo}" -O hdmi_logo.png
+            real_logo="$(grep -m1 'og:image' hdmi_logo.txt | sed -n 's/.*content="\([^"]*\)".*/\1/p')"
+
+            if [[ -z "$real_logo" ]]; then
+              echo "::error::Could not extract direct image link from ibb.co page (HDMI)"
+              exit 1
+            fi
+
+            wget -t 3 -T 60 --no-check-certificate "$real_logo" -O hdmi_logo.png
+
           else
             wget -t 3 -T 60 --no-check-certificate "${{ github.event.inputs.hdmi_picture_link }}" -O hdmi_logo.png
           fi
-          if [ "$?" != "0" ]; then
-            echo "::error::Failed to get ${{ github.event.inputs.hdmi_picture_link }}"
-            exit 1
-          fi
         fi
 
-        # Process the downloaded logo into the format necessary for the kernel
+        ########################
+        # PROCESS LOGOS
+        ########################
+
         pngtopnm logo.png | ppmquant 224 | pnmnoraw > drivers/video/logo/logo_linux_clut224.ppm
-        if [ "$?" != "0" ]; then
-          echo "::error::${{ github.event.inputs.picture_link }} is not a compatible png file for the boot logo"
-          exit 1
-        fi
+
         if [[ "${{ github.event.inputs.update_hdmi }}" == "Yep" ]]; then
-          if [ -f "hdmi_logo.png" ]; then
+          if [[ -f "hdmi_logo.png" ]]; then
             pngtopnm hdmi_logo.png | ppmquant 224 | pnmnoraw > drivers/video/logo/logo_hdmi_clut224.ppm
-            if [ "$?" != "0" ]; then
-              echo "::error::${{ github.event.inputs.hdmi_picture_link }} is not a compatible png file for the boot logo"
-              exit 1
-            fi
           else
             imgp -nx 1280x720 logo.png
             pngtopnm logo_IMGP.png | ppmquant 224 | pnmnoraw > drivers/video/logo/logo_hdmi_clut224.ppm
-            if [ "$?" != "0" ]; then
-              echo "::error::${{ github.event.inputs.picture_link }} is not a compatible png file for the hdmi output logo"
-              exit 1
-            fi
           fi
         fi
 
-        # If no errors, let's build the kernel and make it available as an artifact if successful
+        ########################
+        # BUILD KERNEL
+        ########################
+
         if [[ "${{ github.event.inputs.device_unit }}" == "RK2023" ]] || [[ "${{ github.event.inputs.device_unit }}" == "RGB30" ]] || [[ "${{ github.event.inputs.device_unit }}" == "RGB20PRO" ]]; then
-          make ARCH=arm64 rk3566_optimized_with_wifi_linux_defconfig && make ARCH=arm64 KERNEL_DTS=rk3566 KERNEL_CONFIG=rk3566_optimized_with_wifi_linux_defconfig -j2
+          make ARCH=arm64 rk3566_optimized_with_wifi_linux_defconfig
+          make ARCH=arm64 KERNEL_DTS=rk3566 KERNEL_CONFIG=rk3566_optimized_with_wifi_linux_defconfig -j2
         else
-          make ARCH=arm64 rk3566_optimized_linux_defconfig && make ARCH=arm64 KERNEL_DTS=rk3566 KERNEL_CONFIG=rk3566_optimized_linux_defconfig -j2
+          make ARCH=arm64 rk3566_optimized_linux_defconfig
+          make ARCH=arm64 KERNEL_DTS=rk3566 KERNEL_CONFIG=rk3566_optimized_linux_defconfig -j2
         fi
+
         cp arch/arm64/boot/Image ../.
+
     - name: Get kernel artifact
       uses: actions/upload-artifact@v4
       with:
